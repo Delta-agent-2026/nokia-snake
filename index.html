@@ -289,7 +289,7 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(-8px); }
 
-  @media (pointer: coarse) {
+  @media (pointer: coarse), (hover: none) {
     .pad { display: grid; }
   }
   @media (max-height: 540px) {
@@ -699,7 +699,10 @@
   }
 
   function render(now) {
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    /* scale the 600-logical board to the actual canvas backing store so
+       nothing is ever cropped out of view (fixed the invisible-apple bug) */
+    var sx = canvas.width / boardPx;
+    ctx.setTransform(sx, 0, 0, sx, 0, 0);
     ctx.clearRect(0, 0, boardPx, boardPx);
     /* subtle LCD tint */
     ctx.fillStyle = "#0d140c";
@@ -732,7 +735,14 @@
       gameOver(true);
       return;
     }
-    food = free[Math.floor(Math.random() * free.length)];
+    /* keep the apple within reach of the head so the next target is always on screen */
+    var hx = snake[0].x, hy = snake[0].y;
+    var near = free.filter(function (c) {
+      var d = Math.abs(c.x - hx) + Math.abs(c.y - hy);
+      return d >= 3 && d <= 8;
+    });
+    var pool = near.length ? near : free;
+    food = pool[Math.floor(Math.random() * pool.length)];
     food.born = performance.now();
     SND.spawn();
   }
@@ -800,8 +810,8 @@
       tickMs = Math.max(68, 150 - (level - 1) * 11);
       SND.levelUp();
       showToast("LEVEL " + level + " · FASTER!");
-    } else if (eaten % 10 === 0) {
-      showToast(pick(["OM NOM NOM", "+10! TASTY", "GROWING...", "ZERO REGRETS"]));
+    } else {
+      showToast(pick(["+10 · TASTY", "OM NOM NOM", "YUM +10", "GROWING...", "+10 · NICE"]));
     }
     spawnFood();
   }
@@ -842,12 +852,17 @@
     particles = [];
     scoreEl.textContent = "0";
     scoreEl.classList.remove("score-flash");
-    /* food away from spawn row */
+    /* first apple: close enough to see, far enough to chase */
     var candidates = [];
     for (var x = 0; x < GRID; x++) for (var y = 0; y < GRID; y++) {
       if (y < mid - 3 || y > mid + 3 || x < mid - 5) candidates.push({ x: x, y: y });
     }
-    food = candidates[Math.floor(Math.random() * candidates.length)];
+    var closer = candidates.filter(function (c) {
+      var d = Math.abs(c.x - mid) + Math.abs(c.y - mid);
+      return d >= 4 && d <= 9;
+    });
+    var pick2 = closer.length ? closer : candidates;
+    food = pick2[Math.floor(Math.random() * pick2.length)];
     food.born = performance.now();
   }
 
@@ -938,6 +953,10 @@
 
   window.addEventListener("keydown", function (e) {
     var k = KEYS[e.code];
+    if (e.repeat && (k || e.code === "Space" || e.code === "Enter" || e.code === "KeyP" || e.code === "KeyR")) {
+      e.preventDefault();
+      return; /* no key-repeat storms: one press = one action */
+    }
     if (k) {
       e.preventDefault();
       if (state === "menu" || state === "over") return; /* start handled by enter/space/button */
@@ -957,26 +976,31 @@
     if (e.code === "KeyM") toggleSound();
   });
 
-  /* touch: swipe anywhere on the board */
+  /* touch/pen/mouse: swipe anywhere on the board; fires on movement, so slow drags work */
   var touchStart = null;
   canvas.addEventListener("pointerdown", function (e) {
-    touchStart = { x: e.clientX, y: e.clientY, t: performance.now() };
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    touchStart = { x: e.clientX, y: e.clientY, t: performance.now(), done: false };
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+  }, { passive: true });
+  canvas.addEventListener("pointermove", function (e) {
+    if (!touchStart || touchStart.done) return;
+    var dx = e.clientX - touchStart.x, dy = e.clientY - touchStart.y;
+    if (Math.hypot(dx, dy) < 14) return;
+    touchStart.done = true;
+    if (Math.abs(dx) > Math.abs(dy)) pressDir(dx > 0 ? { x: 1, y: 0 } : { x: -1, y: 0 });
+    else pressDir(dy > 0 ? { x: 0, y: 1 } : { x: 0, y: -1 });
   }, { passive: true });
   canvas.addEventListener("pointerup", function (e) {
     if (!touchStart) return;
-    var dx = e.clientX - touchStart.x, dy = e.clientY - touchStart.y;
-    var dur = performance.now() - touchStart.t;
+    var wasTap = !touchStart.done && Math.hypot(e.clientX - touchStart.x, e.clientY - touchStart.y) < 14;
     touchStart = null;
-    if (Math.hypot(dx, dy) < 12) {
-      /* tap */
+    if (wasTap) {
+      /* tap to start / resume */
       if (state === "menu") startGame();
       else if (state === "over") startGame();
       else if (state === "paused") resumeGame();
-      return;
     }
-    if (dur > 600) return;
-    if (Math.abs(dx) > Math.abs(dy)) pressDir(dx > 0 ? { x: 1, y: 0 } : { x: -1, y: 0 });
-    else pressDir(dy > 0 ? { x: 0, y: 1 } : { x: 0, y: -1 });
   }, { passive: true });
 
   /* on-screen pad */
@@ -1017,6 +1041,13 @@
   try { best = parseInt(localStorage.getItem("snake.best"), 10) || 0; } catch (e) {}
   bestEl.textContent = String(best);
   fitCanvas();
+  /* show the on-screen pad on anything touch-capable, even if media queries lie */
+  try {
+    if (navigator.maxTouchPoints > 0 ||
+        (window.matchMedia && (matchMedia("(any-pointer: coarse)").matches || matchMedia("(hover: none)").matches))) {
+      document.getElementById("pad").style.display = "grid";
+    }
+  } catch (e) {}
   resetGame();               /* pre-render a nice menu snake */
   render(performance.now());
   window.addEventListener("resize", fitCanvas);
